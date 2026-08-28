@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: kroger-mcp
+    runtime: python
+    plan: free
+
+    buildCommand: pip install .
+    startCommand: python remote_server.py
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.11
+
+      - key: KROGER_CLIENT_ID
+        sync: false
+
+      - key: KROGER_CLIENT_SECRET
+        sync: false
+
+      - key: KROGER_REDIRECT_URI
+        sync: false
+
+      - key: KROGER_USER_ZIP_CODE
+        value: "43123"
