@@ -14,6 +14,7 @@ from urllib.parse import urlparse, parse_qs
 # Import the PKCE utilities from kroger-api
 from kroger_api.utils import generate_pkce_parameters
 from kroger_api import KrogerAPI
+from kroger_mcp.render_token_sync import sync_refresh_token_to_render
 
 # Load environment variables
 load_dotenv()
@@ -99,9 +100,8 @@ def register_auth_tools(mcp):
             redirect_url: The full URL from your browser after authorization
             
         Returns:
-            Dictionary indicating authentication status. On remote deployments,
-            deployment_seed_update_required indicates whether the configured
-            KROGER_USER_REFRESH_TOKEN differs from the newly issued refresh token.
+            Dictionary indicating authentication status and whether the refresh
+            token was synchronized to durable Render service configuration.
         """
         global _pkce_params, _auth_state
         
@@ -174,6 +174,15 @@ def register_auth_tools(mcp):
                 and configured_refresh_token != issued_refresh_token
             )
             deployment_seed_missing = bool(issued_refresh_token and not configured_refresh_token)
+
+            render_sync = sync_refresh_token_to_render(issued_refresh_token) if issued_refresh_token else {
+                "attempted": False,
+                "synced": False,
+                "reason": "no_refresh_token",
+            }
+            if render_sync.get("synced"):
+                deployment_seed_update_required = False
+                deployment_seed_missing = False
             
             # Clear PKCE parameters and state after successful exchange
             _pkce_params = None
@@ -181,18 +190,23 @@ def register_auth_tools(mcp):
             
             if ctx:
                 await ctx.info("Authentication successful!")
-                if deployment_seed_update_required:
+                if render_sync.get("synced"):
+                    await ctx.info("Persisted the new Kroger refresh token to Render configuration.")
+                elif deployment_seed_update_required:
                     await ctx.warning(
                         "OAuth issued a refresh token that differs from KROGER_USER_REFRESH_TOKEN. "
-                        "On an ephemeral deployment, update the deployment seed before the next restart."
+                        "Automatic Render synchronization is not configured or failed; update the "
+                        "deployment seed before the next restart."
                     )
             
             message = "Authentication successful! You can now use Kroger API tools that require authentication."
-            if deployment_seed_update_required:
+            if render_sync.get("synced"):
+                message += " The refresh token was synchronized to Render for restart-safe recovery."
+            elif deployment_seed_update_required:
                 message += (
                     " The deployment refresh-token seed is not synchronized with the newly issued token. "
-                    "Because ephemeral hosts lose the token file on restart/deploy, update "
-                    "KROGER_USER_REFRESH_TOKEN before the next restart."
+                    "Because ephemeral hosts lose the token file on restart/deploy, configure RENDER_API_KEY "
+                    "for automatic synchronization or update KROGER_USER_REFRESH_TOKEN manually before the next restart."
                 )
             
             return {
@@ -200,6 +214,7 @@ def register_auth_tools(mcp):
                 "message": message,
                 "deployment_seed_update_required": deployment_seed_update_required,
                 "deployment_seed_missing": deployment_seed_missing,
+                "render_refresh_token_sync": render_sync,
                 "token_info": {
                     "expires_in": token_info.get("expires_in"),
                     "token_type": token_info.get("token_type"),
