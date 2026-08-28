@@ -1,14 +1,20 @@
 import os
 
-from kroger_mcp.server import mcp
+from kroger_mcp.server import create_server
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8000"))
+
+def main():
+    mcp = create_server()
+
+    port = int(os.environ.get("PORT", "10000"))
 
     mcp.run(
-        transport="streamable-http",
+        transport="http",
         host="0.0.0.0",
         port=port,
-        stateless_http=True,
-        json_response=True,
+        path="/mcp",
     )
+
+
+if __name__ == "__main__":
+    main()
