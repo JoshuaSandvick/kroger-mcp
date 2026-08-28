@@ -32,5 +32,12 @@ services:
       - key: KROGER_USER_REFRESH_TOKEN
         sync: false
 
+      # Optional but recommended on Render's free tier. Render injects
+      # RENDER_SERVICE_ID automatically; this API key lets the running service
+      # update only its KROGER_USER_REFRESH_TOKEN setting when Kroger rotates it.
+      # Keep the value in Render's secret environment configuration, never Git.
+      - key: RENDER_API_KEY
+        sync: false
+
       - key: KROGER_TOKEN_DIR
         value: "/tmp/kroger-mcp"
