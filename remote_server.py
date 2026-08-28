@@ -1,11 +1,13 @@
 import os
 
 from bootstrap_tokens import bootstrap_user_token
+from kroger_refresh_patch import install_refresh_patch
 from kroger_mcp.server import create_server
 
 
 def main():
     bootstrap_user_token()
+    install_refresh_patch()
 
     mcp = create_server()
 
