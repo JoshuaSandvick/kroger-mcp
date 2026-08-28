@@ -22,3 +22,9 @@ services:
 
       - key: KROGER_USER_ZIP_CODE
         value: "43123"
+
+      - key: KROGER_USER_REFRESH_TOKEN
+        sync: false
+
+      - key: KROGER_TOKEN_DIR
+        value: "/tmp/kroger-mcp"
