@@ -2,6 +2,7 @@ import sys
 
 from kroger_api.client import KrogerClient
 from kroger_api.token_storage import save_token
+from kroger_mcp.render_token_sync import sync_refresh_token_to_render
 
 
 _original_refresh_token = KrogerClient.refresh_token
@@ -11,6 +12,9 @@ def patched_refresh_token(self, refresh_token: str):
     """
     Refresh Kroger user auth while preserving the existing refresh token
     if Kroger does not return one in the refresh response.
+
+    On Render, also persist the effective refresh token to the service's
+    KROGER_USER_REFRESH_TOKEN setting when Render API synchronization is enabled.
     """
     token_info = self._get_token(
         grant_type="refresh_token",
@@ -28,8 +32,11 @@ def patched_refresh_token(self, refresh_token: str):
 
     self.token_info = token_info
 
+    sync_result = sync_refresh_token_to_render(token_info["refresh_token"])
+
     print(
-        "Kroger access token refreshed; refresh token preserved.",
+        "Kroger access token refreshed; refresh token preserved."
+        + (" Render seed synchronized." if sync_result.get("synced") else ""),
         file=sys.stderr,
     )
 
