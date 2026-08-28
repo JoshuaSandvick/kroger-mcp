@@ -171,14 +171,36 @@ def _save_preferences(preferences: dict) -> None:
         print(f"Warning: Could not save preferences: {e}", file=sys.stderr)
 
 
+def get_configured_location_id() -> Optional[str]:
+    """Get the deployment-configured preferred location, if present."""
+    location_id = os.getenv("KROGER_PREFERRED_LOCATION_ID")
+    if not location_id:
+        return None
+    location_id = location_id.strip()
+    return location_id or None
+
+
 def get_preferred_location_id() -> Optional[str]:
-    """Get the current preferred location ID from preferences file"""
+    """Get the effective preferred location ID.
+
+    A deployment-level KROGER_PREFERRED_LOCATION_ID is authoritative when set.
+    This keeps remote MCP deployments deterministic even when their writable
+    filesystem is ephemeral. Saved preferences remain as a fallback for local
+    or interactive use.
+    """
+    configured_location_id = get_configured_location_id()
+    if configured_location_id:
+        return configured_location_id
+
     preferences = _load_preferences()
     return preferences.get("preferred_location_id")
 
 
 def set_preferred_location_id(location_id: str) -> None:
-    """Set the preferred location ID in preferences file"""
+    """Set the saved preferred location ID.
+
+    Note: KROGER_PREFERRED_LOCATION_ID, when configured, remains authoritative.
+    """
     preferences = _load_preferences()
     preferences["preferred_location_id"] = location_id
     _save_preferences(preferences)

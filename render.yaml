@@ -23,6 +23,12 @@ services:
       - key: KROGER_USER_ZIP_CODE
         value: "43123"
 
+      # Hoover Road Kroger, Grove City, OH. This deployment-level value is
+      # authoritative for product/location operations so restarts do not lose
+      # the selected store when Render's ephemeral filesystem is cleared.
+      - key: KROGER_PREFERRED_LOCATION_ID
+        value: "01600842"
+
       - key: KROGER_USER_REFRESH_TOKEN
         sync: false
 
