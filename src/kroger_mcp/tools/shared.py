@@ -21,6 +21,7 @@ _client_credentials_client: Optional[KrogerAPI] = None
 
 # JSON files for configuration storage
 PREFERENCES_FILE = "kroger_preferences.json"
+USER_TOKEN_FILE = ".kroger_token_user.json"
 
 
 def get_client_credentials_client() -> KrogerAPI:
@@ -54,68 +55,104 @@ def get_client_credentials_client() -> KrogerAPI:
         raise Exception(f"Failed to get client credentials: {str(e)}")
 
 
+def _client_from_user_token(token_info: Dict[str, Any]) -> Optional[KrogerAPI]:
+    """Create and validate a user client from one token candidate.
+
+    kroger-api's token validation already attempts a refresh when a refresh token
+    is present. Returning None here means the candidate could not be validated or
+    refreshed; callers may then try another candidate (for example the deployment
+    seed token).
+    """
+    client = KrogerAPI()
+    client.client.token_info = token_info
+    client.client.token_file = USER_TOKEN_FILE
+
+    try:
+        if client.test_current_token():
+            return client
+    except Exception as exc:
+        print(f"Kroger user token candidate failed: {exc}", file=sys.stderr)
+
+    return None
+
+
 def get_authenticated_client() -> KrogerAPI:
-    """Get or create a user-authenticated client for cart operations
-    
-    This function attempts to load an existing token or prompts for authentication.
-    In an MCP context, the user needs to explicitly call start_authentication and
-    complete_authentication tools to authenticate.
-    
+    """Get or create a user-authenticated client for cart operations.
+
+    Token recovery order:
+      1. Reuse the in-memory authenticated client if it is still valid.
+      2. Try the token persisted by kroger-api.
+      3. If configured and different, try KROGER_USER_REFRESH_TOKEN as a
+         deployment-level recovery seed.
+
+    This matters for remote MCP deployments because the token directory may be
+    ephemeral. A stale on-disk token should not prevent a valid deployment seed
+    from being tried.
+
     Returns:
         KrogerAPI: Authenticated client
-        
+
     Raises:
         Exception: If no valid token is available and authentication is required
     """
     global _authenticated_client
     
     if _authenticated_client is not None and _authenticated_client.test_current_token():
-        # Client exists and token is still valid
         return _authenticated_client
     
-    # Clear the reference if token is invalid
     _authenticated_client = None
     
     try:
         load_and_validate_env(["KROGER_CLIENT_ID", "KROGER_CLIENT_SECRET", "KROGER_REDIRECT_URI"])
-        
-        # Try to load existing user token first
-        token_file = ".kroger_token_user.json"
-        token_info = load_token(token_file)
-        
-        if token_info:
-            # Create a new client with the loaded token
-            _authenticated_client = KrogerAPI()
-            _authenticated_client.client.token_info = token_info
-            _authenticated_client.client.token_file = token_file
-            
-            if _authenticated_client.test_current_token():
-                # Token is valid, use it
+
+        stored_token = load_token(USER_TOKEN_FILE)
+        deployment_refresh_token = os.environ.get("KROGER_USER_REFRESH_TOKEN")
+        if deployment_refresh_token:
+            deployment_refresh_token = deployment_refresh_token.strip() or None
+
+        candidates = []
+        if stored_token:
+            candidates.append(("stored", stored_token))
+
+        stored_refresh_token = stored_token.get("refresh_token") if stored_token else None
+        if deployment_refresh_token and deployment_refresh_token != stored_refresh_token:
+            candidates.append((
+                "deployment",
+                {
+                    "refresh_token": deployment_refresh_token,
+                    "access_token": "",
+                    "expires_in": 0,
+                    "token_type": "bearer",
+                },
+            ))
+
+        for source, token_info in candidates:
+            client = _client_from_user_token(token_info)
+            if client is not None:
+                _authenticated_client = client
+                if source == "deployment":
+                    print(
+                        "Recovered Kroger user authentication from KROGER_USER_REFRESH_TOKEN.",
+                        file=sys.stderr,
+                    )
                 return _authenticated_client
-            
-            # Token is invalid, try to refresh it
-            if "refresh_token" in token_info:
-                try:
-                    _authenticated_client.authorization.refresh_token(token_info["refresh_token"])
-                    # If refresh was successful, return the client
-                    if _authenticated_client.test_current_token():
-                        return _authenticated_client
-                except Exception:
-                    # Refresh failed, need to re-authenticate
-                    _authenticated_client = None
-        
-        # No valid token available, need user-initiated authentication
+
+        if deployment_refresh_token:
+            raise Exception(
+                "Authentication required. The configured KROGER_USER_REFRESH_TOKEN was present "
+                "but could not be refreshed. It may be stale or revoked. Complete OAuth again, "
+                "then update the deployment refresh-token seed before the next restart/deploy."
+            )
+
         raise Exception(
-            "Authentication required. Please use the start_authentication tool to begin the OAuth flow, "
+            "Authentication required. No usable user token or KROGER_USER_REFRESH_TOKEN seed "
+            "is available. Please use the start_authentication tool to begin the OAuth flow, "
             "then complete it with the complete_authentication tool."
         )
     except Exception as e:
         if "Authentication required" in str(e):
-            # This is an expected error when authentication is needed
             raise
-        else:
-            # Other unexpected errors
-            raise Exception(f"Authentication failed: {str(e)}")
+        raise Exception(f"Authentication failed: {str(e)}")
 
 
 def invalidate_authenticated_client():
