@@ -99,7 +99,9 @@ def register_auth_tools(mcp):
             redirect_url: The full URL from your browser after authorization
             
         Returns:
-            Dictionary indicating authentication status
+            Dictionary indicating authentication status. On remote deployments,
+            deployment_seed_update_required indicates whether the configured
+            KROGER_USER_REFRESH_TOKEN differs from the newly issued refresh token.
         """
         global _pkce_params, _auth_state
         
@@ -155,25 +157,49 @@ def register_auth_tools(mcp):
             
             # Exchange the authorization code for tokens with the code verifier
             if ctx:
-                await ctx.info(f"Exchanging authorization code for tokens with code_verifier")
+                await ctx.info("Exchanging authorization code for tokens with code_verifier")
             
-            # Use the code_verifier from the PKCE parameters
             token_info = kroger.authorization.get_token_with_authorization_code(
                 auth_code,
                 code_verifier=_pkce_params["code_verifier"]
             )
+
+            issued_refresh_token = token_info.get("refresh_token")
+            configured_refresh_token = os.environ.get("KROGER_USER_REFRESH_TOKEN")
+            if configured_refresh_token:
+                configured_refresh_token = configured_refresh_token.strip() or None
+
+            deployment_seed_update_required = bool(
+                issued_refresh_token
+                and configured_refresh_token != issued_refresh_token
+            )
+            deployment_seed_missing = bool(issued_refresh_token and not configured_refresh_token)
             
             # Clear PKCE parameters and state after successful exchange
             _pkce_params = None
             _auth_state = None
             
             if ctx:
-                await ctx.info(f"Authentication successful!")
+                await ctx.info("Authentication successful!")
+                if deployment_seed_update_required:
+                    await ctx.warning(
+                        "OAuth issued a refresh token that differs from KROGER_USER_REFRESH_TOKEN. "
+                        "On an ephemeral deployment, update the deployment seed before the next restart."
+                    )
             
-            # Return success response
+            message = "Authentication successful! You can now use Kroger API tools that require authentication."
+            if deployment_seed_update_required:
+                message += (
+                    " The deployment refresh-token seed is not synchronized with the newly issued token. "
+                    "Because ephemeral hosts lose the token file on restart/deploy, update "
+                    "KROGER_USER_REFRESH_TOKEN before the next restart."
+                )
+            
             return {
                 "success": True,
-                "message": "Authentication successful! You can now use Kroger API tools that require authentication.",
+                "message": message,
+                "deployment_seed_update_required": deployment_seed_update_required,
+                "deployment_seed_missing": deployment_seed_missing,
                 "token_info": {
                     "expires_in": token_info.get("expires_in"),
                     "token_type": token_info.get("token_type"),
