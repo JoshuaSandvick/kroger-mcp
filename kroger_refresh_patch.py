@@ -2,7 +2,7 @@ import sys
 
 from kroger_api.client import KrogerClient
 from kroger_api.token_storage import save_token
-from kroger_mcp.render_token_sync import sync_refresh_token_to_render
+from kroger_mcp.render_token_sync import sync_refresh_token_to_render, token_fingerprint
 
 
 _original_refresh_token = KrogerClient.refresh_token
@@ -32,10 +32,14 @@ def patched_refresh_token(self, refresh_token: str):
 
     self.token_info = token_info
 
-    sync_result = sync_refresh_token_to_render(token_info["refresh_token"])
+    sync_result = sync_refresh_token_to_render(
+        token_info["refresh_token"],
+        source="patched_refresh_token",
+    )
 
     print(
-        "Kroger access token refreshed; refresh token preserved."
+        "Kroger access token refreshed; refresh token preserved. "
+        f"fingerprint={token_fingerprint(token_info.get('refresh_token'))}."
         + (" Render seed synchronized." if sync_result.get("synced") else ""),
         file=sys.stderr,
     )
