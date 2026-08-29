@@ -20,6 +20,8 @@ from kroger_mcp.render_token_sync import sync_refresh_token_to_render
 load_dotenv()
 
 # Store PKCE parameters between steps
+OAUTH_SCOPES = "product.compact cart.basic:write profile.compact"
+
 _pkce_params = None
 _auth_state = None
 
@@ -61,8 +63,10 @@ def register_auth_tools(mcp):
         # Initialize the Kroger API client
         kroger = KrogerAPI()
         
-        # Scopes needed for Kroger API (cart.basic:write is needed for cart operations)
-        scopes = "product.compact cart.basic:write"
+        # The kroger-api validator checks /profile, so profile.compact must be included.
+        # Without it, a valid cart token receives a non-200 profile response and the
+        # upstream library unnecessarily refreshes the token on validation.
+        scopes = OAUTH_SCOPES
         
         # Get the authorization URL with PKCE
         auth_url = kroger.authorization.get_authorization_url(
