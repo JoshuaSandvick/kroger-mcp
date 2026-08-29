@@ -1,4 +1,5 @@
 import sys
+import threading
 
 import kroger_api.client as kroger_client_module
 import kroger_api.token_storage as token_storage
@@ -6,8 +7,8 @@ from kroger_api.client import KrogerClient
 from kroger_mcp.render_token_sync import sync_refresh_token_to_render, token_fingerprint
 
 
-_original_refresh_token = KrogerClient.refresh_token
 _original_save_token = token_storage.save_token
+_refresh_lock = threading.RLock()
 
 
 def patched_save_token(token_info, token_file=None):
@@ -32,35 +33,52 @@ def patched_save_token(token_info, token_file=None):
 
 def patched_refresh_token(self, refresh_token: str):
     """
-    Refresh Kroger user auth while preserving the existing refresh token
-    if Kroger does not return one in the refresh response.
+    Refresh Kroger user auth while preserving rotation safely.
 
-    On Render, also persist the effective refresh token to the service's
-    KROGER_USER_REFRESH_TOKEN setting when Render API synchronization is enabled.
+    Refresh-token exchanges are serialized because rotating refresh tokens must not
+    be used concurrently. Before exchanging, re-read the token file: if another
+    request already rotated the token, reuse that newer token payload instead of
+    submitting the stale refresh token again.
     """
-    token_info = self._get_token(
-        grant_type="refresh_token",
-        refresh_token=refresh_token,
-    )
-
-    # Some OAuth servers do not return refresh_token on every refresh.
-    # Preserve the token we used unless Kroger explicitly supplies a new one.
-    if not token_info.get("refresh_token"):
-        token_info["refresh_token"] = refresh_token
-
-    # Save to the same user-token location kroger-api normally uses.
     token_file = self.token_file or ".kroger_token_user.json"
-    patched_save_token(token_info, token_file)
 
-    self.token_info = token_info
+    with _refresh_lock:
+        latest_token_info = token_storage.load_token(token_file)
+        latest_refresh_token = (
+            latest_token_info.get("refresh_token")
+            if latest_token_info
+            else None
+        )
 
-    print(
-        "Kroger access token refreshed; refresh token preserved. "
-        f"fingerprint={token_fingerprint(token_info.get('refresh_token'))}.",
-        file=sys.stderr,
-    )
+        if latest_refresh_token and latest_refresh_token != refresh_token:
+            self.token_info = latest_token_info
+            print(
+                "Skipped stale Kroger refresh-token exchange; a newer token "
+                f"already exists fingerprint={token_fingerprint(latest_refresh_token)}.",
+                file=sys.stderr,
+            )
+            return latest_token_info
 
-    return token_info
+        token_info = self._get_token(
+            grant_type="refresh_token",
+            refresh_token=refresh_token,
+        )
+
+        # Some OAuth servers do not return refresh_token on every refresh.
+        # Preserve the token we used unless Kroger explicitly supplies a new one.
+        if not token_info.get("refresh_token"):
+            token_info["refresh_token"] = refresh_token
+
+        patched_save_token(token_info, token_file)
+        self.token_info = token_info
+
+        print(
+            "Kroger access token refreshed; refresh token preserved. "
+            f"fingerprint={token_fingerprint(token_info.get('refresh_token'))}.",
+            file=sys.stderr,
+        )
+
+        return token_info
 
 
 def install_refresh_patch():
