@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 from kroger_mcp.tools import auth
 from kroger_mcp.tools import shared
 import kroger_refresh_patch
