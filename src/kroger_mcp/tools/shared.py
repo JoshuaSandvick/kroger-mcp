@@ -105,10 +105,16 @@ def get_authenticated_client() -> KrogerAPI:
     """Get or create a user-authenticated client for cart operations.
 
     Token recovery order:
-      1. Reuse the in-memory authenticated client if it is still valid.
+      1. Reuse the in-memory authenticated client without a proactive profile check.
       2. Try the token persisted by kroger-api.
       3. If configured and different, try KROGER_USER_REFRESH_TOKEN as a
          deployment-level recovery seed.
+
+    The cached client is intentionally not validated here. kroger-api validates user
+    tokens against the profile endpoint and refreshes on any non-200 response. That
+    couples cart authentication to profile permissions/network health and previously
+    caused needless refresh-token exchanges on normal cart calls. Actual Kroger API
+    requests already perform reactive refresh on 401.
 
     This matters for remote MCP deployments because the token directory may be
     ephemeral. A stale on-disk token should not prevent a valid deployment seed
@@ -122,7 +128,7 @@ def get_authenticated_client() -> KrogerAPI:
     """
     global _authenticated_client
     
-    if _authenticated_client is not None and _authenticated_client.test_current_token():
+    if _authenticated_client is not None:
         return _authenticated_client
     
     _authenticated_client = None
