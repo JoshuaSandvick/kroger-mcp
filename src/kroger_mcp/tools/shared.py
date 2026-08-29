@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from kroger_api.kroger_api import KrogerAPI
 from kroger_api.utils.env import load_and_validate_env, get_zip_code
 from kroger_api.token_storage import load_token, get_token_file_path
+from kroger_mcp.render_token_sync import sync_token_info_to_render, token_fingerprint
 
 # Load environment variables
 load_dotenv()
@@ -68,7 +69,31 @@ def _client_from_user_token(token_info: Dict[str, Any]) -> Optional[KrogerAPI]:
     client.client.token_file = USER_TOKEN_FILE
 
     try:
+        before_refresh = token_info.get("refresh_token")
+        print(
+            f"Validating Kroger user token candidate "
+            f"refresh={token_fingerprint(before_refresh)}.",
+            file=sys.stderr,
+        )
+
         if client.test_current_token():
+            # test_current_token() may refresh internally through a kroger-api path
+            # that does not call our KrogerClient.refresh_token monkey patch.
+            # The client now holds the authoritative post-validation token payload,
+            # so synchronize it regardless of which internal path was used.
+            authoritative_token = client.client.token_info or token_info
+            sync_result = sync_token_info_to_render(
+                authoritative_token,
+                source="post_test_current_token",
+            )
+            after_refresh = authoritative_token.get("refresh_token")
+            print(
+                f"Kroger user token validated "
+                f"before={token_fingerprint(before_refresh)} "
+                f"after={token_fingerprint(after_refresh)} "
+                f"render_synced={sync_result.get('synced', False)}.",
+                file=sys.stderr,
+            )
             return client
     except Exception as exc:
         print(f"Kroger user token candidate failed: {exc}", file=sys.stderr)
@@ -109,6 +134,11 @@ def get_authenticated_client() -> KrogerAPI:
         deployment_refresh_token = os.environ.get("KROGER_USER_REFRESH_TOKEN")
         if deployment_refresh_token:
             deployment_refresh_token = deployment_refresh_token.strip() or None
+            print(
+                f"Loaded Kroger deployment refresh-token seed "
+                f"fingerprint={token_fingerprint(deployment_refresh_token)}.",
+                file=sys.stderr,
+            )
 
         candidates = []
         if stored_token:
