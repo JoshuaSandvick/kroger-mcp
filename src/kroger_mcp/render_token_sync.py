@@ -25,6 +25,54 @@ def token_fingerprint(token: Optional[str]) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
 
 
+def _render_headers(api_key: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+
+def _resolve_render_service_id(api_key: str) -> Optional[str]:
+    """Resolve the current Render service ID without relying on undocumented env vars."""
+    configured = os.environ.get("RENDER_SERVICE_ID")
+    if configured:
+        configured = configured.strip()
+        if configured:
+            return configured
+
+    service_name = os.environ.get("RENDER_SERVICE_NAME")
+    if not service_name:
+        return None
+
+    service_name = service_name.strip()
+    if not service_name:
+        return None
+
+    response = requests.get(
+        f"{RENDER_API_BASE}/services",
+        headers=_render_headers(api_key),
+        params={"name": service_name, "limit": 100},
+        timeout=10,
+    )
+    response.raise_for_status()
+    matches = []
+    for item in response.json():
+        service = item.get("service", item)
+        if service.get("name") == service_name and service.get("id"):
+            matches.append(service["id"])
+
+    if len(matches) == 1:
+        return matches[0]
+
+    print(
+        f"Warning: Could not uniquely resolve Render service "
+        f"name={service_name!r}; matches={len(matches)}.",
+        file=sys.stderr,
+    )
+    return None
+
+
 def sync_refresh_token_to_render(
     refresh_token: str,
     *,
@@ -72,8 +120,7 @@ def sync_refresh_token_to_render(
         }
 
     api_key = os.environ.get("RENDER_API_KEY")
-    service_id = os.environ.get("RENDER_SERVICE_ID")
-    if not api_key or not service_id:
+    if not api_key:
         return {
             "attempted": False,
             "synced": False,
@@ -81,16 +128,20 @@ def sync_refresh_token_to_render(
             "fingerprint": new_fp,
         }
 
-    url = f"{RENDER_API_BASE}/services/{service_id}/env-vars/{TOKEN_ENV_KEY}"
-
     try:
+        service_id = _resolve_render_service_id(api_key)
+        if not service_id:
+            return {
+                "attempted": True,
+                "synced": False,
+                "reason": "render_service_not_resolved",
+                "fingerprint": new_fp,
+            }
+
+        url = f"{RENDER_API_BASE}/services/{service_id}/env-vars/{TOKEN_ENV_KEY}"
         response = requests.put(
             url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
+            headers=_render_headers(api_key),
             json={"value": refresh_token},
             timeout=10,
         )
