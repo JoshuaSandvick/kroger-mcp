@@ -2,16 +2,21 @@
 Shared utilities and client management for Kroger MCP server
 """
 
+import json
 import os
 import sys
-import json
-from typing import Optional, Dict, Any
-from dotenv import load_dotenv
+from typing import Any, Dict, Optional
 
+from dotenv import load_dotenv
 from kroger_api.kroger_api import KrogerAPI
-from kroger_api.utils.env import load_and_validate_env, get_zip_code
-from kroger_api.token_storage import load_token, get_token_file_path
-from kroger_mcp.render_token_sync import sync_token_info_to_render, token_fingerprint
+from kroger_api.token_storage import get_token_file_path, load_token
+from kroger_api.utils.env import get_zip_code, load_and_validate_env
+
+from kroger_mcp.durable_token_store import (
+    get_token_store,
+    persist_token_info,
+    token_fingerprint,
+)
 
 # Load environment variables
 load_dotenv()
@@ -28,29 +33,36 @@ USER_TOKEN_FILE = ".kroger_token_user.json"
 def get_client_credentials_client() -> KrogerAPI:
     """Get or create a client credentials authenticated client for public data"""
     global _client_credentials_client
-    
-    if _client_credentials_client is not None and _client_credentials_client.test_current_token():
+
+    if (
+        _client_credentials_client is not None
+        and _client_credentials_client.test_current_token()
+    ):
         return _client_credentials_client
-    
+
     _client_credentials_client = None
-    
+
     try:
         load_and_validate_env(["KROGER_CLIENT_ID", "KROGER_CLIENT_SECRET"])
         _client_credentials_client = KrogerAPI()
-        
+
         # Try to load existing token first
         token_file = ".kroger_token_client_product.compact.json"
         token_info = load_token(token_file)
-        
+
         if token_info:
             # Test if the token is still valid
             _client_credentials_client.client.token_info = token_info
             if _client_credentials_client.test_current_token():
                 # Token is valid, use it
                 return _client_credentials_client
-        
+
         # Token is invalid or not found, get a new one
-        token_info = _client_credentials_client.authorization.get_token_with_client_credentials("product.compact")
+        token_info = (
+            _client_credentials_client.authorization.get_token_with_client_credentials(
+                "product.compact"
+            )
+        )
         return _client_credentials_client
     except Exception as e:
         raise Exception(f"Failed to get client credentials: {str(e)}")
@@ -77,12 +89,10 @@ def _client_from_user_token(token_info: Dict[str, Any]) -> Optional[KrogerAPI]:
         )
 
         if client.test_current_token():
-            # test_current_token() may refresh internally through a kroger-api path
-            # that does not call our KrogerClient.refresh_token monkey patch.
-            # The client now holds the authoritative post-validation token payload,
-            # so synchronize it regardless of which internal path was used.
+            # The client now holds the authoritative post-validation payload.
+            # Persist it regardless of which kroger-api path produced it.
             authoritative_token = client.client.token_info or token_info
-            sync_result = sync_token_info_to_render(
+            persistence_result = persist_token_info(
                 authoritative_token,
                 source="post_test_current_token",
             )
@@ -91,7 +101,7 @@ def _client_from_user_token(token_info: Dict[str, Any]) -> Optional[KrogerAPI]:
                 f"Kroger user token validated "
                 f"before={token_fingerprint(before_refresh)} "
                 f"after={token_fingerprint(after_refresh)} "
-                f"render_synced={sync_result.get('synced', False)}.",
+                f"durable={persistence_result.get('persisted', False)}.",
                 file=sys.stderr,
             )
             return client
@@ -106,9 +116,10 @@ def get_authenticated_client() -> KrogerAPI:
 
     Token recovery order:
       1. Reuse the in-memory authenticated client without a proactive profile check.
-      2. Try the token persisted by kroger-api.
-      3. If configured and different, try KROGER_USER_REFRESH_TOKEN as a
-         deployment-level recovery seed.
+      2. Try the durable Upstash token payload.
+      3. Try the token persisted locally by kroger-api.
+      4. If durable storage is empty, try KROGER_USER_REFRESH_TOKEN as a
+         one-time deployment bootstrap seed.
 
     The cached client is intentionally not validated here. kroger-api validates user
     tokens against the profile endpoint and refreshes on any non-200 response. That
@@ -116,9 +127,9 @@ def get_authenticated_client() -> KrogerAPI:
     caused needless refresh-token exchanges on normal cart calls. Actual Kroger API
     requests already perform reactive refresh on 401.
 
-    This matters for remote MCP deployments because the token directory may be
-    ephemeral. A stale on-disk token should not prevent a valid deployment seed
-    from being tried.
+    This matters for remote MCP deployments because the token directory is
+    ephemeral and Render environment changes are not applied to an existing
+    deployment. Upstash is authoritative once it contains a token.
 
     Returns:
         KrogerAPI: Authenticated client
@@ -127,14 +138,25 @@ def get_authenticated_client() -> KrogerAPI:
         Exception: If no valid token is available and authentication is required
     """
     global _authenticated_client
-    
+
     if _authenticated_client is not None:
         return _authenticated_client
-    
+
     _authenticated_client = None
-    
+
     try:
-        load_and_validate_env(["KROGER_CLIENT_ID", "KROGER_CLIENT_SECRET", "KROGER_REDIRECT_URI"])
+        load_and_validate_env(
+            ["KROGER_CLIENT_ID", "KROGER_CLIENT_SECRET", "KROGER_REDIRECT_URI"]
+        )
+
+        store = get_token_store()
+        durable_token = store.load_token_info() if store else None
+        if durable_token:
+            print(
+                "Loaded durable Kroger token from Upstash "
+                f"fingerprint={token_fingerprint(durable_token.get('refresh_token'))}.",
+                file=sys.stderr,
+            )
 
         stored_token = load_token(USER_TOKEN_FILE)
         deployment_refresh_token = os.environ.get("KROGER_USER_REFRESH_TOKEN")
@@ -147,20 +169,36 @@ def get_authenticated_client() -> KrogerAPI:
             )
 
         candidates = []
-        if stored_token:
-            candidates.append(("stored", stored_token))
+        seen_refresh_tokens = set()
+        for source, token_info in (
+            ("durable", durable_token),
+            ("stored", stored_token),
+        ):
+            refresh_token = token_info.get("refresh_token") if token_info else None
+            if token_info and refresh_token not in seen_refresh_tokens:
+                candidates.append((source, token_info))
+                if refresh_token:
+                    seen_refresh_tokens.add(refresh_token)
 
-        stored_refresh_token = stored_token.get("refresh_token") if stored_token else None
-        if deployment_refresh_token and deployment_refresh_token != stored_refresh_token:
-            candidates.append((
-                "deployment",
-                {
-                    "refresh_token": deployment_refresh_token,
-                    "access_token": "",
-                    "expires_in": 0,
-                    "token_type": "bearer",
-                },
-            ))
+        # A deployment environment token is bootstrap-only. Never fall back to it
+        # after Upstash has an authoritative token, because it can be an invalidated
+        # ancestor in Kroger's refresh-token rotation chain.
+        if (
+            not durable_token
+            and deployment_refresh_token
+            and deployment_refresh_token not in seen_refresh_tokens
+        ):
+            candidates.append(
+                (
+                    "deployment",
+                    {
+                        "refresh_token": deployment_refresh_token,
+                        "access_token": "",
+                        "expires_in": 0,
+                        "token_type": "bearer",
+                    },
+                )
+            )
 
         for source, token_info in candidates:
             client = _client_from_user_token(token_info)
@@ -173,11 +211,17 @@ def get_authenticated_client() -> KrogerAPI:
                     )
                 return _authenticated_client
 
+        if durable_token:
+            raise Exception(
+                "Authentication required. The durable Kroger token in Upstash could not "
+                "be validated or refreshed. Complete OAuth again to replace it."
+            )
+
         if deployment_refresh_token:
             raise Exception(
                 "Authentication required. The configured KROGER_USER_REFRESH_TOKEN was present "
-                "but could not be refreshed. It may be stale or revoked. Complete OAuth again, "
-                "then update the deployment refresh-token seed before the next restart/deploy."
+                "but could not be refreshed. It may be stale or revoked. Complete OAuth again "
+                "to seed durable storage."
             )
 
         raise Exception(
@@ -216,10 +260,12 @@ def resolve_data_file(filename: str) -> str:
     path = get_token_file_path(filename)
     if not os.path.exists(path) and os.path.exists(filename):
         try:
-            with open(filename, 'r') as src, open(path, 'w') as dst:
+            with open(filename, "r") as src, open(path, "w") as dst:
                 dst.write(src.read())
         except Exception as e:
-            print(f"Warning: Could not migrate {filename} from CWD: {e}", file=sys.stderr)
+            print(
+                f"Warning: Could not migrate {filename} from CWD: {e}", file=sys.stderr
+            )
     return path
 
 
@@ -228,7 +274,7 @@ def _load_preferences() -> dict:
     try:
         prefs_path = resolve_data_file(PREFERENCES_FILE)
         if os.path.exists(prefs_path):
-            with open(prefs_path, 'r') as f:
+            with open(prefs_path, "r") as f:
                 return json.load(f)
     except Exception as e:
         print(f"Warning: Could not load preferences: {e}", file=sys.stderr)
@@ -238,7 +284,7 @@ def _load_preferences() -> dict:
 def _save_preferences(preferences: dict) -> None:
     """Save preferences to file"""
     try:
-        with open(resolve_data_file(PREFERENCES_FILE), 'w') as f:
+        with open(resolve_data_file(PREFERENCES_FILE), "w") as f:
             json.dump(preferences, f, indent=2)
     except Exception as e:
         print(f"Warning: Could not save preferences: {e}", file=sys.stderr)

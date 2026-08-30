@@ -240,6 +240,22 @@ State files (cart, order history, preferences) and OAuth tokens are stored in th
 
 They are never written to the current working directory, which may be read-only or change between sessions under MCP hosts like Claude Desktop. Files from older versions that live in the working directory are migrated automatically on first use.
 
+#### Durable OAuth tokens on ephemeral hosts
+
+Free Render web services erase their filesystem whenever they spin down. For
+restart-safe Kroger cart authentication, create an Upstash Redis database and set:
+
+- `UPSTASH_REDIS_REST_URL`
+- `UPSTASH_REDIS_REST_TOKEN`
+
+The server stores the complete Kroger user-token payload in Upstash and uses a
+distributed lock to serialize rotating refresh-token exchanges across overlapping
+instances. `KROGER_USER_REFRESH_TOKEN` remains supported only as a one-time seed
+when Upstash is empty. After Upstash has a token, it is authoritative.
+
+Keep both Upstash values in the hosting provider's secret configuration. Do not
+commit them to the repository or paste them into logs.
+
 ### 🚧 Kroger Public API Limitations
 - **View Only**: The `remove_from_cart` and `clear_current_cart` tools ONLY affect local tracking, not the actual Kroger cart
 - **Local Sync**: Use these tools only when the user has already removed items from their cart in the Kroger app/website

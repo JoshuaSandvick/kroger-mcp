@@ -32,12 +32,13 @@ services:
       - key: KROGER_USER_REFRESH_TOKEN
         sync: false
 
-      # Recommended on Render's free tier. This API key lets the running service
-      # update its KROGER_USER_REFRESH_TOKEN setting when Kroger rotates it.
-      # The service ID is resolved from Render's documented RENDER_SERVICE_NAME;
-      # RENDER_SERVICE_ID may still be set explicitly as an override.
-      # Keep the API key in Render's secret environment configuration, never Git.
-      - key: RENDER_API_KEY
+      # Upstash stores the complete OAuth token payload across free-tier spin-downs
+      # and coordinates refresh-token rotation between overlapping instances.
+      # Copy both values from the Upstash database's REST API section.
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+
+      - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
 
       - key: KROGER_TOKEN_DIR
